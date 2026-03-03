@@ -51,24 +51,6 @@ enum
 
 static GParamSpec *props[LAST_PROP] = { 0 };
 
-enum
-{
-  SIGNAL_SELECT,
-  LAST_SIGNAL
-};
-
-static guint signals[LAST_SIGNAL];
-
-static void
-apps_page_select_cb (BzTagList    *self,
-                     BzEntryGroup *group,
-                     BzAppsPage   *page)
-{
-  GtkWidget *nav_view = gtk_widget_get_ancestor (GTK_WIDGET (self), ADW_TYPE_NAVIGATION_VIEW);
-  adw_navigation_view_pop (ADW_NAVIGATION_VIEW (nav_view));
-  g_signal_emit (self, signals[SIGNAL_SELECT], 0, group);
-}
-
 static DexFuture *
 search_finally (DexFuture *future,
                 GWeakRef  *wr)
@@ -111,9 +93,6 @@ search_finally (DexFuture *future,
           apps_page = bz_apps_page_new (title, model);
           bz_apps_page_set_subtitle (BZ_APPS_PAGE (apps_page), subtitle);
 
-          g_signal_connect_swapped (
-              apps_page, "select",
-              G_CALLBACK (apps_page_select_cb), self);
 
           nav_view = gtk_widget_get_ancestor (GTK_WIDGET (self), ADW_TYPE_NAVIGATION_VIEW);
           adw_navigation_view_push (ADW_NAVIGATION_VIEW (nav_view), apps_page);
@@ -137,6 +116,7 @@ tag_button_clicked_cb (BzTagList *self,
   g_autoptr (BzResult) result  = NULL;
   g_autoptr (DexFuture) future = NULL;
   const char *tag              = NULL;
+  g_autofree char *route       = NULL;
 
   g_return_if_fail (BZ_IS_TAG_LIST (self));
   g_return_if_fail (GTK_IS_BUTTON (button));
@@ -152,7 +132,8 @@ tag_button_clicked_cb (BzTagList *self,
 
   g_object_set_data_full (G_OBJECT (self), "current-tag", g_strdup (tag), g_free);
 
-  future = bz_flathub_state_search_keyword (self->flathub_state, tag);
+  route  = g_strdup_printf ("/collection/keyword?keyword=%s", tag);
+  future = bz_flathub_state_search_collection (self->flathub_state, route);
   future = dex_future_finally (
       future,
       (DexFutureCallback) search_finally,
@@ -322,14 +303,6 @@ bz_tag_list_class_init (BzTagListClass *klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
 
   g_object_class_install_properties (object_class, LAST_PROP, props);
-
-  signals[SIGNAL_SELECT] =
-      g_signal_new ("select",
-                    G_TYPE_FROM_CLASS (klass),
-                    G_SIGNAL_RUN_LAST,
-                    0, NULL, NULL,
-                    g_cclosure_marshal_VOID__OBJECT,
-                    G_TYPE_NONE, 1, BZ_TYPE_ENTRY_GROUP);
 }
 
 static void

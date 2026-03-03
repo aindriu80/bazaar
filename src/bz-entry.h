@@ -24,6 +24,8 @@
 #include <gtk/gtk.h>
 #include <libdex.h>
 
+#include "bz-repository.h"
+
 G_BEGIN_DECLS
 
 typedef enum
@@ -83,9 +85,19 @@ bz_entry_is_holding (BzEntry *self);
 gboolean
 bz_entry_is_installed (BzEntry *self);
 
+const char *
+bz_entry_get_installed_version (BzEntry *self);
+
+void
+bz_entry_set_installed_version (BzEntry    *self,
+                                const char *version);
+
 void
 bz_entry_set_installed (BzEntry *self,
                         gboolean installed);
+
+gboolean
+bz_entry_is_searchable (BzEntry *self);
 
 gboolean
 bz_entry_is_of_kinds (BzEntry *self,
@@ -160,6 +172,10 @@ bz_entry_get_donation_url (BzEntry *self);
 const char *
 bz_entry_get_forge_url (BzEntry *self);
 
+BzRepository *
+bz_entry_get_repository (BzEntry    *self,
+                         GListModel *repos);
+
 gboolean
 bz_entry_get_is_foss (BzEntry *self);
 
@@ -208,9 +224,6 @@ bz_entry_get_content_rating (BzEntry *self);
 
 GListModel *
 bz_entry_get_categories (BzEntry *self);
-
-DexFuture *
-bz_entry_load_mini_icon (BzEntry *self);
 
 gint
 bz_entry_calc_usefulness (BzEntry *self);

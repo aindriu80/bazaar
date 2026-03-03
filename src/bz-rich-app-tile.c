@@ -20,17 +20,17 @@
 
 #include "bz-rich-app-tile.h"
 #include "bz-entry.h"
-#include "bz-group-tile-css-watcher.h"
 #include "bz-rounded-picture.h"
 #include "bz-themed-entry-group-rect.h"
 #include "bz-util.h"
+
+#include <glib/gi18n.h>
 
 struct _BzRichAppTile
 {
   BzListTile    parent_instance;
   BzEntryGroup *group;
-  GdkPaintable *first_screenshot;
-  gboolean      has_screenshot;
+  BzEntry      *ui_entry;
   DexFuture    *ui_entry_resolve;
 
   GtkWidget *picture_box;
@@ -42,33 +42,14 @@ enum
 {
   PROP_0,
   PROP_GROUP,
-  PROP_FIRST_SCREENSHOT,
-  PROP_HAS_SCREENSHOT,
+  PROP_UI_ENTRY,
   LAST_PROP
 };
 
 static GParamSpec *props[LAST_PROP] = { 0 };
 
-enum
-{
-  SIGNAL_INSTALL_CLICKED,
-  LAST_SIGNAL
-};
 
-static guint signals[LAST_SIGNAL];
-
-static void update_screenshot (BzRichAppTile *self);
-
-static inline void
-notify_properties (BzRichAppTile *self, gboolean has_screenshot)
-{
-  if (self->has_screenshot != has_screenshot)
-    {
-      self->has_screenshot = has_screenshot;
-      g_object_notify_by_pspec (G_OBJECT (self), props[PROP_HAS_SCREENSHOT]);
-    }
-  g_object_notify_by_pspec (G_OBJECT (self), props[PROP_FIRST_SCREENSHOT]);
-}
+static void update_ui_entry (BzRichAppTile *self);
 
 static DexFuture *
 ui_entry_resolved_finally (DexFuture *future,
@@ -76,46 +57,34 @@ ui_entry_resolved_finally (DexFuture *future,
 {
   g_autoptr (BzRichAppTile) self = NULL;
   const GValue *value            = NULL;
-  gboolean      has_screenshot   = FALSE;
 
   bz_weak_get_or_return_reject (self, wr);
-
   value = dex_future_get_value (future, NULL);
   if (value != NULL)
     {
-      BzEntry *ui_entry                  = NULL;
-      g_autoptr (GListModel) screenshots = NULL;
-
-      ui_entry = g_value_get_object (value);
-
-      g_object_get (ui_entry, "screenshot-paintables", &screenshots, NULL);
-      if (screenshots != NULL &&
-          g_list_model_get_n_items (screenshots) > 0)
-        {
-          self->first_screenshot = g_list_model_get_item (screenshots, 0);
-          has_screenshot         = TRUE;
-        }
+      BzEntry *ui_entry = g_value_get_object (value);
+      g_set_object (&self->ui_entry, ui_entry);
     }
-
-  dex_clear (&self->ui_entry_resolve);
-  notify_properties (self, has_screenshot);
+  else
+    {
+      g_clear_object (&self->ui_entry);
+    }
+  g_object_notify_by_pspec (G_OBJECT (self), props[PROP_UI_ENTRY]);
 
   return NULL;
 }
 
 static void
-update_screenshot (BzRichAppTile *self)
+update_ui_entry (BzRichAppTile *self)
 {
   g_autoptr (BzResult) ui_entry_result = NULL;
-  g_autoptr (GListModel) screenshots   = NULL;
 
   dex_clear (&self->ui_entry_resolve);
-  g_clear_object (&self->first_screenshot);
 
-  if (self->group == NULL)
+  if (self->ui_entry != NULL)
     {
-      notify_properties (self, FALSE);
-      return;
+      g_clear_object (&self->ui_entry);
+      g_object_notify_by_pspec (G_OBJECT (self), props[PROP_UI_ENTRY]);
     }
 
   ui_entry_result        = bz_entry_group_dup_ui_entry (self->group);
@@ -132,7 +101,7 @@ bz_rich_app_tile_dispose (GObject *object)
   BzRichAppTile *self = BZ_RICH_APP_TILE (object);
 
   g_clear_object (&self->group);
-  g_clear_object (&self->first_screenshot);
+  g_clear_object (&self->ui_entry);
   dex_clear (&self->ui_entry_resolve);
 
   G_OBJECT_CLASS (bz_rich_app_tile_parent_class)->dispose (object);
@@ -150,11 +119,8 @@ bz_rich_app_tile_get_property (GObject    *object,
     case PROP_GROUP:
       g_value_set_object (value, bz_rich_app_tile_get_group (self));
       break;
-    case PROP_FIRST_SCREENSHOT:
-      g_value_set_object (value, self->first_screenshot);
-      break;
-    case PROP_HAS_SCREENSHOT:
-      g_value_set_boolean (value, self->has_screenshot);
+    case PROP_UI_ENTRY:
+      g_value_set_object (value, self->ui_entry);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -173,8 +139,7 @@ bz_rich_app_tile_set_property (GObject      *object,
     case PROP_GROUP:
       bz_rich_app_tile_set_group (self, g_value_get_object (value));
       break;
-    case PROP_FIRST_SCREENSHOT:
-    case PROP_HAS_SCREENSHOT:
+    case PROP_UI_ENTRY:
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -201,11 +166,28 @@ is_zero (gpointer object,
   return value == 0;
 }
 
+static gboolean
+logical_and (gpointer object,
+             gboolean value1,
+             gboolean value2)
+{
+  return value1 && value2;
+}
+
 static void
 install_button_clicked_cb (BzRichAppTile *self,
                            GtkButton     *button)
 {
-  g_signal_emit (self, signals[SIGNAL_INSTALL_CLICKED], 0);
+  gtk_widget_activate_action (GTK_WIDGET (self), "window.install-group", "(sb)",
+                              bz_entry_group_get_id (self->group), FALSE);
+}
+
+static void
+remove_button_clicked_cb (BzRichAppTile *self,
+                          GtkButton     *button)
+{
+  gtk_widget_activate_action (GTK_WIDGET (self), "window.remove-group", "(sb)",
+                              bz_entry_group_get_id (self->group), FALSE);
 }
 
 static void
@@ -225,31 +207,14 @@ bz_rich_app_tile_class_init (BzRichAppTileClass *klass)
           BZ_TYPE_ENTRY_GROUP,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
 
-  props[PROP_FIRST_SCREENSHOT] =
+  props[PROP_UI_ENTRY] =
       g_param_spec_object (
-          "first-screenshot",
+          "ui-entry",
           NULL, NULL,
-          GDK_TYPE_PAINTABLE,
-          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
-
-  props[PROP_HAS_SCREENSHOT] =
-      g_param_spec_boolean (
-          "has-screenshot",
-          NULL, NULL,
-          FALSE,
+          BZ_TYPE_ENTRY,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (object_class, LAST_PROP, props);
-
-  signals[SIGNAL_INSTALL_CLICKED] =
-      g_signal_new (
-          "install-clicked",
-          G_OBJECT_CLASS_TYPE (klass),
-          G_SIGNAL_RUN_FIRST,
-          0,
-          NULL, NULL,
-          NULL,
-          G_TYPE_NONE, 0);
 
   g_type_ensure (BZ_TYPE_LIST_TILE);
   g_type_ensure (BZ_TYPE_ROUNDED_PICTURE);
@@ -259,7 +224,9 @@ bz_rich_app_tile_class_init (BzRichAppTileClass *klass)
   gtk_widget_class_bind_template_callback (widget_class, invert_boolean);
   gtk_widget_class_bind_template_callback (widget_class, is_null);
   gtk_widget_class_bind_template_callback (widget_class, is_zero);
+  gtk_widget_class_bind_template_callback (widget_class, logical_and);
   gtk_widget_class_bind_template_callback (widget_class, install_button_clicked_cb);
+  gtk_widget_class_bind_template_callback (widget_class, remove_button_clicked_cb);
   gtk_widget_class_bind_template_child (widget_class, BzRichAppTile, picture_box);
 
   gtk_widget_class_set_accessible_role (widget_class, GTK_ACCESSIBLE_ROLE_BUTTON);
@@ -288,14 +255,37 @@ void
 bz_rich_app_tile_set_group (BzRichAppTile *self,
                             BzEntryGroup  *group)
 {
+  const char *title = NULL;
+  gboolean verified = FALSE;
+  g_autofree char *label = NULL;
+
   g_return_if_fail (BZ_IS_RICH_APP_TILE (self));
 
   g_clear_object (&self->group);
 
   if (group != NULL)
-    self->group = g_object_ref (group);
+    {
+      self->group = g_object_ref (group);
 
-  update_screenshot (self);
+      title = bz_entry_group_get_title (self->group);
+      verified = bz_entry_group_get_is_verified (self->group);
+
+      if (verified)
+        {
+          label = g_strdup_printf ("%s, %s", title, _("Verified"));
+          gtk_accessible_update_property (GTK_ACCESSIBLE (self),
+                                          GTK_ACCESSIBLE_PROPERTY_LABEL, label,
+                                          -1);
+        }
+      else
+        {
+          gtk_accessible_update_property (GTK_ACCESSIBLE (self),
+                                          GTK_ACCESSIBLE_PROPERTY_LABEL, title,
+                                          -1);
+        }
+    }
+
+  update_ui_entry (self);
 
   g_object_notify_by_pspec (G_OBJECT (self), props[PROP_GROUP]);
 }

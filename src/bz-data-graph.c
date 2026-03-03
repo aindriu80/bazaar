@@ -26,9 +26,9 @@
 #include "bz-data-point.h"
 #include <math.h>
 
-#define LABEL_MARGIN        75.0
-#define LABEL_MARGIN_RIGHT  35.0
-#define CARD_EDGE_THRESHOLD 120
+#define LABEL_MARGIN       75.0
+#define LABEL_MARGIN_RIGHT 35.0
+#define TICK_LENGTH        5.0
 
 struct _BzDataGraph
 {
@@ -43,6 +43,8 @@ struct _BzDataGraph
   double      transition_progress;
   double      rounded_axis_max;
 
+  AdwStyleManager *style_manager;
+
   GskPath        *path;
   GskPathMeasure *path_measure;
   GskRenderNode  *fg;
@@ -53,6 +55,11 @@ struct _BzDataGraph
   double              motion_x;
   double              motion_y;
   GtkGesture         *gesture;
+
+  GtkWidget *tooltip_box;
+  GtkWidget *tooltip_label1;
+  GtkWidget *tooltip_prefix_label;
+  GtkWidget *tooltip_label2;
 };
 
 G_DEFINE_FINAL_TYPE (BzDataGraph, bz_data_graph, GTK_TYPE_WIDGET)
@@ -89,6 +96,11 @@ static double
 calculate_axis_tick_value (double value, gboolean round_up);
 
 static void
+on_style_changed (BzDataGraph     *self,
+                  GParamSpec      *pspec,
+                  AdwStyleManager *style_manager);
+
+static void
 bz_data_graph_dispose (GObject *object)
 {
   BzDataGraph *self = BZ_DATA_GRAPH (object);
@@ -97,6 +109,10 @@ bz_data_graph_dispose (GObject *object)
     g_signal_handlers_disconnect_by_func (
         self->model, items_changed, self);
 
+  g_signal_handlers_disconnect_by_func (self->style_manager,
+                                        on_style_changed,
+                                        self);
+
   g_clear_object (&self->model);
   g_clear_pointer (&self->independent_axis_label, g_free);
   g_clear_pointer (&self->dependent_axis_label, g_free);
@@ -104,6 +120,9 @@ bz_data_graph_dispose (GObject *object)
   g_clear_pointer (&self->path, gsk_path_unref);
   g_clear_pointer (&self->path_measure, gsk_path_measure_unref);
   g_clear_pointer (&self->fg, gsk_render_node_unref);
+
+  if (self->tooltip_box != NULL)
+    gtk_widget_unparent (self->tooltip_box);
 
   G_OBJECT_CLASS (bz_data_graph_parent_class)->dispose (object);
 }
@@ -193,6 +212,14 @@ bz_data_graph_size_allocate (GtkWidget *widget,
 }
 
 static void
+on_style_changed (BzDataGraph     *self,
+                  GParamSpec      *pspec,
+                  AdwStyleManager *style_manager)
+{
+  gtk_widget_queue_draw (GTK_WIDGET (self));
+}
+
+static void
 bz_data_graph_snapshot (GtkWidget   *widget,
                         GtkSnapshot *snapshot)
 {
@@ -269,10 +296,6 @@ bz_data_graph_snapshot (GtkWidget   *widget,
       guint hovered_idx                      = 0;
       g_autoptr (BzDataPoint) point          = NULL;
       g_autoptr (GskStroke) crosshair_stroke = NULL;
-      g_autoptr (PangoLayout) layout1        = NULL;
-      g_autoptr (PangoLayout) layout2        = NULL;
-      g_autofree char *line1_text            = NULL;
-      g_autofree char *line2_text            = NULL;
       double           graph_height          = 0.0;
       double           graph_width           = 0.0;
       double           fraction              = 0.0;
@@ -280,17 +303,12 @@ bz_data_graph_snapshot (GtkWidget   *widget,
       double           point_y               = 0.0;
       GskRoundedRect   rounded_rect          = { { { 0 } } };
       GdkRGBA          line_color            = { 0 };
-      PangoRectangle   text1_extents         = { 0 };
-      PangoRectangle   text2_extents         = { 0 };
-      GskRoundedRect   text_bg_rect          = { { { 0 } } };
-      GdkRGBA          text_bg_color         = { 0 };
-      GdkRGBA          shadow_color          = { 0 };
-      double           card_width            = 0.0;
-      double           card_height           = 0.0;
       double           card_x                = 0.0;
       double           card_y                = 0.0;
       double           rounded_axis_max      = 0.0;
       const char      *prefix                = NULL;
+      g_autofree char *line2_text            = NULL;
+      GtkRequisition   natural_size;
 
       n_items     = g_list_model_get_n_items (self->model);
       graph_width = widget_width - LABEL_MARGIN - LABEL_MARGIN_RIGHT;
@@ -355,69 +373,26 @@ bz_data_graph_snapshot (GtkWidget   *widget,
       gtk_snapshot_append_color (snapshot, accent_color, &rounded_rect.bounds);
       gtk_snapshot_pop (snapshot);
 
-      layout1    = pango_layout_new (gtk_widget_get_pango_context (widget));
-      line1_text = g_strdup (bz_data_point_get_label (point));
-      pango_layout_set_text (layout1, line1_text, -1);
-      pango_layout_get_pixel_extents (layout1, NULL, &text1_extents);
+      gtk_label_set_text (GTK_LABEL (self->tooltip_label1), bz_data_point_get_label (point));
 
-      prefix     = self->tooltip_prefix != NULL ? self->tooltip_prefix : ("");
-      layout2    = pango_layout_new (gtk_widget_get_pango_context (widget));
-      line2_text = g_strdup_printf ("%s %'.0f", prefix, bz_data_point_get_dependent (point));
-      pango_layout_set_text (layout2, line2_text, -1);
-      pango_layout_get_pixel_extents (layout2, NULL, &text2_extents);
+      prefix = self->tooltip_prefix != NULL ? self->tooltip_prefix : "";
+      gtk_label_set_text (GTK_LABEL (self->tooltip_prefix_label), prefix);
+      line2_text = g_strdup_printf ("%'.0f", bz_data_point_get_dependent (point));
+      gtk_label_set_text (GTK_LABEL (self->tooltip_label2), line2_text);
 
-      card_width  = MAX (text1_extents.width, text2_extents.width) + 16.0;
-      card_height = text1_extents.height + text2_extents.height + 20.0;
+      gtk_widget_get_preferred_size (self->tooltip_box, NULL, &natural_size);
 
-      if (widget_width - self->motion_x < CARD_EDGE_THRESHOLD)
-        card_x = self->motion_x - card_width - 10.0;
+      gtk_widget_allocate (self->tooltip_box, natural_size.width, natural_size.height, -1, NULL);
+
+      if (self->motion_x > widget_width / 2.0)
+        card_x = self->motion_x - natural_size.width - 10.0;
       else
         card_x = self->motion_x + 10.0;
       card_y = self->motion_y + 10.0;
 
-      /* The proper way is to make each actual element it's own widget or Gizmo
-       but that's a lot of work */
-      if (adw_style_manager_get_dark (style_manager))
-        {
-          text_bg_color = (GdkRGBA) { 0.18, 0.18, 0.2, 1.0 };
-          shadow_color  = (GdkRGBA) { 0.0, 0.0, 0.06, 0.20 };
-        }
-      else
-        {
-          text_bg_color = (GdkRGBA) { 1.0, 1.0, 1.0, 1.0 };
-          shadow_color  = (GdkRGBA) { 0.0, 0.0, 0.0, 0.20 };
-        }
-
-      gsk_rounded_rect_init_from_rect (
-          &text_bg_rect,
-          &GRAPHENE_RECT_INIT (card_x, card_y, card_width, card_height),
-          6.0);
-
-      gtk_snapshot_append_outset_shadow (
-          snapshot,
-          &text_bg_rect,
-          &shadow_color,
-          0.0,
-          0.0,
-          1.0,
-          3.0);
-
-      gtk_snapshot_push_rounded_clip (snapshot, &text_bg_rect);
-      gtk_snapshot_append_color (snapshot, &text_bg_color, &text_bg_rect.bounds);
-      gtk_snapshot_pop (snapshot);
-
       gtk_snapshot_save (snapshot);
-      gtk_snapshot_translate (
-          snapshot,
-          &GRAPHENE_POINT_INIT (card_x + 8.0, card_y + 8.0));
-      gtk_snapshot_append_layout (snapshot, layout1, &widget_color);
-      gtk_snapshot_restore (snapshot);
-
-      gtk_snapshot_save (snapshot);
-      gtk_snapshot_translate (
-          snapshot,
-          &GRAPHENE_POINT_INIT (card_x + 8.0, card_y + 8.0 + text1_extents.height + 4.0));
-      gtk_snapshot_append_layout (snapshot, layout2, &widget_color);
+      gtk_snapshot_translate (snapshot, &GRAPHENE_POINT_INIT (card_x, card_y));
+      gtk_widget_snapshot_child (widget, self->tooltip_box, snapshot);
       gtk_snapshot_restore (snapshot);
     }
 
@@ -509,8 +484,8 @@ update_cursor (BzDataGraph *self,
 
   if (x >= LABEL_MARGIN &&
       y >= 0.0 &&
-      x < widget_width - LABEL_MARGIN &&
-      y < widget_height - LABEL_MARGIN_RIGHT)
+      x < widget_width - LABEL_MARGIN_RIGHT &&
+      y < widget_height - LABEL_MARGIN)
     gtk_widget_set_cursor_from_name (GTK_WIDGET (self), "crosshair");
   else
     gtk_widget_set_cursor (GTK_WIDGET (self), NULL);
@@ -586,6 +561,17 @@ gesture_end (BzDataGraph    *self,
 static void
 bz_data_graph_init (BzDataGraph *self)
 {
+  GtkWidget *inner_box  = NULL;
+  GtkWidget *label2_box = NULL;
+  GtkWidget *icon_image = NULL;
+
+  self->style_manager = adw_style_manager_get_default ();
+
+  g_signal_connect_swapped (self->style_manager, "notify::dark",
+                            G_CALLBACK (on_style_changed), self);
+  g_signal_connect_swapped (self->style_manager, "notify::accent-color",
+                            G_CALLBACK (on_style_changed), self);
+
   self->motion = gtk_event_controller_motion_new ();
   g_signal_connect_swapped (self->motion, "enter", G_CALLBACK (motion_enter), self);
   g_signal_connect_swapped (self->motion, "motion", G_CALLBACK (motion_event), self);
@@ -602,6 +588,43 @@ bz_data_graph_init (BzDataGraph *self)
   self->motion_x         = -1.0;
   self->motion_y         = -1.0;
   self->rounded_axis_max = 0.0;
+
+  self->tooltip_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class (self->tooltip_box, "card");
+  gtk_widget_add_css_class (self->tooltip_box, "floating-tooltip");
+
+  inner_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_margin_start (inner_box, 12);
+  gtk_widget_set_margin_end (inner_box, 12);
+  gtk_widget_set_margin_top (inner_box, 12);
+  gtk_widget_set_margin_bottom (inner_box, 12);
+
+  self->tooltip_label1 = gtk_label_new ("");
+  gtk_widget_add_css_class (self->tooltip_label1, "heading");
+  gtk_label_set_xalign (GTK_LABEL (self->tooltip_label1), 0.0);
+  gtk_box_append (GTK_BOX (inner_box), self->tooltip_label1);
+
+  label2_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+
+  icon_image = gtk_image_new_from_icon_name ("square-filled-symbolic");
+  gtk_widget_add_css_class (icon_image, "accent");
+  gtk_box_append (GTK_BOX (label2_box), icon_image);
+
+  self->tooltip_prefix_label = gtk_label_new ("");
+  gtk_widget_add_css_class (self->tooltip_prefix_label, "body");
+  gtk_widget_add_css_class (self->tooltip_prefix_label, "dim-label");
+  gtk_label_set_xalign (GTK_LABEL (self->tooltip_prefix_label), 0.0);
+  gtk_box_append (GTK_BOX (label2_box), self->tooltip_prefix_label);
+
+  self->tooltip_label2 = gtk_label_new ("");
+  gtk_widget_add_css_class (self->tooltip_label2, "monospace");
+  gtk_widget_add_css_class (self->tooltip_label2, "dimmed");
+  gtk_label_set_xalign (GTK_LABEL (self->tooltip_label2), 0.0);
+
+  gtk_box_append (GTK_BOX (label2_box), self->tooltip_label2);
+  gtk_box_append (GTK_BOX (inner_box), label2_box);
+  gtk_box_append (GTK_BOX (self->tooltip_box), inner_box);
+  gtk_widget_set_parent (self->tooltip_box, GTK_WIDGET (self));
 }
 
 GtkWidget *
@@ -745,8 +768,7 @@ bz_data_graph_set_dependent_decimals (BzDataGraph *self,
 }
 
 void
-bz_data_graph_set_transition_progress (BzDataGraph *self,
-                                       double       transition_progress)
+bz_data_graph_set_transition_progress (BzDataGraph *self, double transition_progress)
 {
   g_return_if_fail (BZ_IS_DATA_GRAPH (self));
 
@@ -874,7 +896,7 @@ refresh_path (BzDataGraph *self,
   font_height = (double) (int) PANGO_PIXELS_CEIL (pango_font_metrics_get_height (metrics));
   g_clear_pointer (&metrics, pango_font_metrics_unref);
 
-  num_ticks = floor (height / (font_height + 25.0));
+  num_ticks = MIN (5, floor (height / (font_height + 25.0)));
   if (num_ticks < 2)
     num_ticks = 2;
 
@@ -954,11 +976,12 @@ refresh_path (BzDataGraph *self,
           gtk_snapshot_append_layout (snapshot, layout, &(GdkRGBA) { 1.0, 1.0, 1.0, 1.0 });
           gtk_snapshot_restore (snapshot);
 
-          gsk_path_builder_move_to (grid_builder, x, 0.0);
-          gsk_path_builder_line_to (grid_builder, x, height);
+          gsk_path_builder_move_to (grid_builder, x, height);
+          gsk_path_builder_line_to (grid_builder, x, height + TICK_LENGTH);
         }
     }
-  gsk_path_builder_move_to (grid_builder, width, 0);
+
+  gsk_path_builder_move_to (grid_builder, 0.0, height);
   gsk_path_builder_line_to (grid_builder, width, height);
 
   gtk_snapshot_save (snapshot);
@@ -997,17 +1020,18 @@ refresh_path (BzDataGraph *self,
       gtk_snapshot_append_layout (snapshot, layout, &(GdkRGBA) { 1.0, 1.0, 1.0, 1.0 });
       gtk_snapshot_restore (snapshot);
 
-      gsk_path_builder_move_to (grid_builder, 0.0, y_pos);
-      gsk_path_builder_line_to (grid_builder, width, y_pos);
+      gsk_path_builder_move_to (grid_builder, -TICK_LENGTH, y_pos);
+      gsk_path_builder_line_to (grid_builder, 0.0, y_pos);
     }
 
   gtk_snapshot_restore (snapshot);
 
+  gsk_path_builder_move_to (grid_builder, 0.0, 0.0);
+  gsk_path_builder_line_to (grid_builder, 0.0, height);
+
   grid        = gsk_path_builder_to_path (grid_builder);
   grid_stroke = gsk_stroke_new (1.0);
-  gtk_snapshot_push_opacity (snapshot, 0.25);
   gtk_snapshot_append_stroke (snapshot, grid, grid_stroke, &(GdkRGBA) { 1.0, 1.0, 1.0, 1.0 });
-  gtk_snapshot_pop (snapshot);
 
   self->path         = gsk_path_builder_to_path (curve_builder);
   self->path_measure = gsk_path_measure_new (self->path);

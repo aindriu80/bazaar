@@ -18,7 +18,7 @@ template $BzAppTile: Button {
 
       Image {
         pixel-size: 64;
-        paintable: bind template.group as <$BzEntryGroup>.icon-paintable;
+        paintable: bind template.group as <$BzEntryGroup>.ui-entry as <$BzResult>.object as <$BzEntry>.icon-paintable;
 
         styles ["icon-dropshadow"]
       }
@@ -53,6 +53,9 @@ template $BzAppTile: Button {
             visible: bind template.group as <$BzEntryGroup>.is-verified;
             icon-name: "verified-checkmark-symbolic";
             pixel-size: 14;
+            accessibility {
+              label: _("Verified");
+            }
           }
         }
 
@@ -82,6 +85,7 @@ template $BzAppTile: Button {
           }
 
           Label {
+            // Translators: As in 'The app is installed'.
             label: _("Installed");
           }
         }

@@ -20,6 +20,8 @@
 
 #define G_LOG_DOMAIN "BAZAAR::APPSTREAM-DESCRIPTION-RENDER"
 
+#include "config.h"
+
 #include <xmlb.h>
 
 #include "bz-appstream-description-render.h"
@@ -59,7 +61,15 @@ enum
 static GParamSpec *props[LAST_PROP] = { 0 };
 
 static void
+setup_text_tags (GtkTextBuffer *buffer);
+
+static void
 regenerate (BzAppstreamDescriptionRender *self);
+
+static void
+insert (GtkTextBuffer *buffer,
+        GtkTextIter   *iter,
+        const char    *text);
 
 static void
 compile (BzAppstreamDescriptionRender *self,
@@ -153,7 +163,7 @@ setup_text_tags (GtkTextBuffer *buffer)
                               NULL);
 
   gtk_text_buffer_create_tag (buffer, "paragraph",
-                              "pixels-below-lines", 6,
+                              "pixels-below-lines", 12,
                               NULL);
 
   gtk_text_buffer_create_tag (buffer, "list-item-ul",
@@ -265,6 +275,35 @@ regenerate (BzAppstreamDescriptionRender *self)
 }
 
 static void
+insert (GtkTextBuffer *buffer,
+        GtkTextIter   *iter,
+        const char    *text)
+{
+  g_auto (GStrv) parts = NULL;
+
+  parts = g_strsplit (text, "**", -1);
+
+  for (int j = 0; parts[j] != NULL; j++)
+    {
+      if (j % 2 == 0)
+        {
+          gtk_text_buffer_insert (buffer, iter, parts[j], -1);
+        }
+      else
+        {
+          GtkTextMark *m  = NULL;
+          GtkTextIter  si = { 0 };
+
+          m = gtk_text_buffer_create_mark (buffer, NULL, iter, TRUE);
+          gtk_text_buffer_insert (buffer, iter, parts[j], -1);
+          gtk_text_buffer_get_iter_at_mark (buffer, &si, m);
+          gtk_text_buffer_apply_tag_by_name (buffer, "emphasis", &si, iter);
+          gtk_text_buffer_delete_mark (buffer, m);
+        }
+    }
+}
+
+static void
 compile (BzAppstreamDescriptionRender *self,
          XbNode                       *node,
          GtkTextBuffer                *buffer,
@@ -278,6 +317,7 @@ compile (BzAppstreamDescriptionRender *self,
   XbNode      *child      = NULL;
   int          kind       = NO_ELEMENT;
   GtkTextMark *start_mark = NULL;
+  int          child_count= 0;
 
   element    = xb_node_get_element (node);
   text       = xb_node_get_text (node);
@@ -315,7 +355,7 @@ compile (BzAppstreamDescriptionRender *self,
               gtk_text_buffer_apply_tag_by_name (buffer, "list-number", &prefix_start_iter, iter);
               gtk_text_buffer_delete_mark (buffer, prefix_start_mark);
             }
-          else if (parent_kind == UNORDERED_LIST)
+          else
             gtk_text_buffer_insert (buffer, iter, "• ", -1);
         }
       else if (g_strcmp0 (element, "code") == 0)
@@ -336,7 +376,7 @@ compile (BzAppstreamDescriptionRender *self,
 
       normalized = normalize_whitespace (text);
       if (normalized != NULL && *normalized != '\0')
-        gtk_text_buffer_insert (buffer, iter, normalized, -1);
+        insert (buffer, iter, normalized);
     }
 
   for (int i = 0; child != NULL; i++)
@@ -354,11 +394,12 @@ compile (BzAppstreamDescriptionRender *self,
 
           normalized = normalize_whitespace (tail);
           if (normalized != NULL && *normalized != '\0')
-            gtk_text_buffer_insert (buffer, iter, normalized, -1);
+            insert (buffer, iter, normalized);
         }
 
       g_object_unref (child);
       child = next;
+      child_count++;
     }
 
   if (start_mark != NULL)
@@ -387,7 +428,7 @@ compile (BzAppstreamDescriptionRender *self,
 
   if (kind == PARAGRAPH && !is_last_sibling)
     gtk_text_buffer_insert (buffer, iter, "\n", 1);
-  else if ((kind == ORDERED_LIST || kind == UNORDERED_LIST) && !is_last_sibling)
+  else if ((kind == ORDERED_LIST || kind == UNORDERED_LIST) && !is_last_sibling && child_count > 0)
     gtk_text_buffer_insert (buffer, iter, "\n", 1);
 }
 
