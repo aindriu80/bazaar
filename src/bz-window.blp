@@ -3,11 +3,11 @@ using Gio 2.0;
 using Adw 1;
 
 template $BzWindow: Adw.ApplicationWindow {
-  title: _("Bazaar");
+  title: bind $format_title(navigation_view.visible-page as <Adw.NavigationPage>.title);
   default-width: 1220;
   default-height: 900;
   width-request: 360;
-  height-request: 550;
+  height-request: 294;
 
   ShortcutController {
     Shortcut {
@@ -97,8 +97,8 @@ template $BzWindow: Adw.ApplicationWindow {
 
                       Adw.ViewStackPage {
                         name: "flathub";
-                        title: _("Flathub");
-                        icon-name: "flathub-symbolic";
+                        title: _("Explore");
+                        icon-name: "explore-symbolic";
 
                         child: $BzFlathubPage {
                           state: bind template.state as <$BzStateInfo>;
@@ -127,7 +127,7 @@ template $BzWindow: Adw.ApplicationWindow {
                         title: _("Search");
                         icon-name: "system-search-symbolic";
 
-                        child: $BzSearchWidget search_widget {
+                        child: $BzSearchPage search_page {
                           state: bind template.state;
                         };
                       }
@@ -241,14 +241,14 @@ template $BzWindow: Adw.ApplicationWindow {
                     }
 
                     [end]
-                    Button {
+                    Button progress_button {
                       styles [
                         "flat",
                         "global-progress-button",
                       ]
 
                       can-focus: bind template.state as <$BzStateInfo>.transaction-manager as <$BzTransactionManager>.active;
-                      can-target: bind template.state as <$BzStateInfo>.transaction-manager as <$BzTransactionManager>.active;
+                      can-target: bind progress_button.can-focus;
 
                       action-name: "window.open-library";
                       has-tooltip: true;
@@ -256,9 +256,9 @@ template $BzWindow: Adw.ApplicationWindow {
 
                       child: $BzGlobalProgress {
                         expand-size: 125;
+                        state: bind template.state as <$BzStateInfo>;
                         active: bind template.state as <$BzStateInfo>.transaction-manager as <$BzTransactionManager>.active;
                         pending: bind template.state as <$BzStateInfo>.transaction-manager as <$BzTransactionManager>.pending;
-                        fraction: bind template.state as <$BzStateInfo>.transaction-manager as <$BzTransactionManager>.current-progress;
                         settings: bind template.state as <$BzStateInfo>.settings;
                       };
                     }
@@ -295,11 +295,10 @@ template $BzWindow: Adw.ApplicationWindow {
 
             Adw.NavigationPage {
               tag: "view";
-              title: "view";
+              title: bind full_view.entry-group as <$BzEntryGroup>.title as <string>;
 
               child: $BzFullView full_view {
                 state: bind template.state;
-                main-menu: primary_menu;
                 update => $update_cb(template);
               };
             }
@@ -325,7 +324,7 @@ template $BzWindow: Adw.ApplicationWindow {
 menu primary_menu {
   section {
     item {
-      label: _("_Donate to Bazaar ❤️");
+      label: _("_Donate to Bazaar");
       action: "app.donate";
     }
   }

@@ -35,6 +35,8 @@
 
 #include "bge.h"
 
+#include "bge-animation-private.h"
+
 enum
 {
   PROP_0,
@@ -54,6 +56,7 @@ struct _BgeAnimation
 
   guint       tag;
   GHashTable *data;
+  GPtrArray  *anonymous;
 };
 G_DEFINE_FINAL_TYPE (BgeAnimation, bge_animation, G_TYPE_OBJECT)
 
@@ -72,8 +75,7 @@ typedef struct
   double               est_duration;
   GTimer              *timer;
   double               velocity;
-  DexPromise          *promise;
-  DexCancellable      *cancellable;
+  GCancellable        *cancellable;
 } SpringData;
 
 static gboolean
@@ -81,28 +83,11 @@ tick_cb (GtkWidget     *widget,
          GdkFrameClock *frame_clock,
          GWeakRef      *wr);
 
-/* Copied with modifications from libadwaita */
-static double
-oscillate (SpringData *data,
-           double      time,
-           double     *velocity);
-
-/* Copied with modifications from libadwaita */
-static double
-get_first_zero (SpringData *data);
-
-/* Copied with modifications from libadwaita */
-static double
-calculate_duration (SpringData *data);
-
 static void
 destroy_spring_data (gpointer ptr);
 
 static void
 destroy_wr (gpointer ptr);
-
-static gboolean
-should_animate (GtkWidget *widget);
 
 static void
 dispose (GObject *object)
@@ -121,6 +106,7 @@ dispose (GObject *object)
 
   g_clear_object (&self->widget);
   g_clear_pointer (&self->data, g_hash_table_unref);
+  g_clear_pointer (&self->anonymous, g_ptr_array_unref);
 
   G_OBJECT_CLASS (bge_animation_parent_class)->dispose (object);
 }
@@ -214,6 +200,8 @@ bge_animation_init (BgeAnimation *self)
   g_weak_ref_init (&self->wr, NULL);
   self->data = g_hash_table_new_full (
       g_str_hash, g_str_equal, g_free, destroy_spring_data);
+  self->anonymous = g_ptr_array_new_with_free_func (
+      destroy_spring_data);
 }
 
 /**
@@ -252,7 +240,7 @@ bge_animation_dup_widget (BgeAnimation *self)
 /**
  * bge_animation_add_spring:
  * @self: a `BgeAnimation`
- * @key: a string ID to replace
+ * @key: (nullable): a string ID to replace, or NULL for anonymous
  * @from: the start value
  * @to: the end value
  * @damping_ratio: the damping ratio
@@ -266,10 +254,8 @@ bge_animation_dup_widget (BgeAnimation *self)
  * Adds a one shot spring animation to @self. If @key is already running in
  * @self, then the old animation is replaced, maintaining the current velocity.
  *
- * Returns: (transfer full): a future which will resolve when the animation
- * completes, or reject when the animation is cancelled
  */
-DexFuture *
+void
 bge_animation_add_spring (BgeAnimation        *self,
                           const char          *key,
                           double               from,
@@ -280,23 +266,24 @@ bge_animation_add_spring (BgeAnimation        *self,
                           BgeAnimationCallback cb,
                           gpointer             user_data,
                           GDestroyNotify       destroy_data,
-                          DexCancellable      *cancellable)
+                          GCancellable        *cancellable)
 {
   g_autoptr (GtkWidget) widget = NULL;
 
-  dex_return_error_if_fail (BGE_IS_ANIMATION (self));
-  dex_return_error_if_fail (key != NULL);
-  dex_return_error_if_fail (cb != NULL);
+  g_return_if_fail (BGE_IS_ANIMATION (self));
+  g_return_if_fail (cb != NULL);
 
   widget = g_weak_ref_get (&self->wr);
   if (widget != NULL)
     {
-      if (should_animate (widget))
+      if (bge_should_animate (widget))
         {
           SpringData *data = NULL;
 
-          /* reuse old data if possible */
-          data = g_hash_table_lookup (self->data, key);
+          if (key != NULL)
+            /* reuse old data if possible */
+            data = g_hash_table_lookup (self->data, key);
+
           if (data != NULL)
             {
               if (data->user_data != NULL &&
@@ -305,14 +292,17 @@ bge_animation_add_spring (BgeAnimation        *self,
                 data->destroy_data (data->user_data);
 
               g_clear_pointer (&data->timer, g_timer_destroy);
-              dex_clear (&data->cancellable);
+              g_clear_object (&data->cancellable);
 
               /* old velocity is retained */
             }
           else
             {
               data = g_new0 (typeof (*data), 1);
-              g_hash_table_replace (self->data, g_strdup (key), data);
+              if (key != NULL)
+                g_hash_table_replace (self->data, g_strdup (key), data);
+              else
+                g_ptr_array_add (self->anonymous, data);
             }
 
           data->from          = from;
@@ -331,20 +321,18 @@ bge_animation_add_spring (BgeAnimation        *self,
           /* We'll fill this in on the first iteration */
           data->timer = NULL;
 
-          /* If this animation is being replaced, reuse the old promise */
-          if (data->promise == NULL ||
-              !dex_future_is_pending (DEX_FUTURE (data->promise)))
-            {
-              dex_clear (&data->promise);
-              data->promise = dex_promise_new ();
-            }
           if (cancellable != NULL)
-            data->cancellable = dex_ref (cancellable);
+            data->cancellable = g_object_ref (cancellable);
 
-          data->est_duration = calculate_duration (data);
+          data->est_duration = spring_calculate_duration (
+              data->damping,
+              data->mass,
+              data->stiffness,
+              data->from,
+              data->to,
+              data->clamp);
 
           cb (widget, key, from, user_data);
-          return dex_ref (data->promise);
         }
       else
         /* If we shouldn't animate, just invoke the callback at the final
@@ -354,7 +342,6 @@ bge_animation_add_spring (BgeAnimation        *self,
           if (user_data != NULL &&
               destroy_data != NULL)
             destroy_data (user_data);
-          return dex_future_new_true ();
         }
     }
   else
@@ -362,11 +349,26 @@ bge_animation_add_spring (BgeAnimation        *self,
       if (user_data != NULL &&
           destroy_data != NULL)
         destroy_data (user_data);
-      return dex_future_new_reject (
-          G_IO_ERROR,
-          G_IO_ERROR_INVAL,
-          "Animation's widget no longer exists");
     }
+}
+
+/**
+ * bge_animation_has_key:
+ * @self: a `BgeAnimation`
+ * @key: a string ID
+ *
+ * Determines whether @key exists and represents an active animation on @self.
+ *
+ * Returns: a boolean representing whether the string ID exists
+ */
+gboolean
+bge_animation_has_key (BgeAnimation *self,
+                       const char   *key)
+{
+  g_return_val_if_fail (BGE_IS_ANIMATION (self), FALSE);
+  g_return_val_if_fail (key != NULL, FALSE);
+
+  return g_hash_table_contains (self->data, key);
 }
 
 /**
@@ -393,13 +395,6 @@ bge_animation_cancel (BgeAnimation *self,
   widget = g_weak_ref_get (&self->wr);
   if (widget != NULL)
     data->cb (widget, key, data->to, data->user_data);
-
-  dex_promise_reject (
-      data->promise,
-      g_error_new (
-          G_IO_ERROR,
-          G_IO_ERROR_CANCELLED,
-          "Animation was cancelled"));
 
   g_hash_table_remove (self->data, key);
 }
@@ -435,13 +430,6 @@ bge_animation_cancel_all (BgeAnimation *self)
       if (widget != NULL)
         data->cb (widget, key, data->to, data->user_data);
 
-      dex_promise_reject (
-          data->promise,
-          g_error_new (
-              G_IO_ERROR,
-              G_IO_ERROR_CANCELLED,
-              "Animation was cancelled"));
-
       g_hash_table_iter_remove (&iter);
     }
 }
@@ -459,8 +447,45 @@ tick_cb (GtkWidget     *widget,
   if (self == NULL)
     return G_SOURCE_REMOVE;
 
-  cancel = !should_animate (widget);
+  cancel = !bge_should_animate (widget);
 
+#define UPDATE(_data, _out_value, _out_finished)                   \
+  G_STMT_START                                                     \
+  {                                                                \
+    if (cancel ||                                                  \
+        ((_data)->cancellable != NULL &&                           \
+         g_cancellable_is_cancelled ((_data)->cancellable)))       \
+      (_out_finished) = TRUE;                                      \
+    else                                                           \
+      {                                                            \
+        double elapsed = 0.0;                                      \
+                                                                   \
+        if ((_data)->timer == NULL)                                \
+          {                                                        \
+            (_data)->timer = g_timer_new ();                       \
+            (_out_value)   = (_data)->from;                        \
+          }                                                        \
+        else                                                       \
+          {                                                        \
+            elapsed      = g_timer_elapsed ((_data)->timer, NULL); \
+            (_out_value) = spring_oscillate (                      \
+                data->damping,                                     \
+                data->mass,                                        \
+                data->stiffness,                                   \
+                data->from,                                        \
+                data->to,                                          \
+                elapsed,                                           \
+                &(_data)->velocity);                               \
+          }                                                        \
+                                                                   \
+        (_out_finished) = elapsed >= (_data)->est_duration;        \
+      }                                                            \
+    if ((_out_finished))                                           \
+      (_out_value) = (_data)->to;                                  \
+  }                                                                \
+  G_STMT_END
+
+  /* Named anims */
   g_hash_table_iter_init (&iter, self->data);
   for (;;)
     {
@@ -475,39 +500,32 @@ tick_cb (GtkWidget     *widget,
               (gpointer *) &data))
         break;
 
-      if (cancel ||
-          (data->cancellable != NULL &&
-           dex_future_is_rejected (DEX_FUTURE (data->cancellable))))
-        finished = TRUE;
-      else
-        {
-          double elapsed = 0.0;
-
-          if (data->timer == NULL)
-            {
-              data->timer = g_timer_new ();
-              value       = data->from;
-            }
-          else
-            {
-              elapsed = g_timer_elapsed (data->timer, NULL);
-              value   = oscillate (data, elapsed, &data->velocity);
-            }
-
-          finished = elapsed >= data->est_duration;
-        }
-      if (finished)
-        value = data->to;
-
+      UPDATE (data, value, finished);
       data->cb (widget, key, value, data->user_data);
 
       if (finished)
-        {
-          if (dex_future_is_pending (DEX_FUTURE (data->promise)))
-            dex_promise_resolve_boolean (data->promise, TRUE);
-          g_hash_table_iter_remove (&iter);
-        }
+        g_hash_table_iter_remove (&iter);
     }
+
+  /* Anonymous anims */
+  for (guint i = 0; i < self->anonymous->len;)
+    {
+      SpringData *data     = NULL;
+      double      value    = 0.0;
+      gboolean    finished = FALSE;
+
+      data = g_ptr_array_index (self->anonymous, i);
+
+      UPDATE (data, value, finished);
+      data->cb (widget, NULL, value, data->user_data);
+
+      if (finished)
+        g_ptr_array_remove_index (self->anonymous, i);
+      else
+        i++;
+    }
+
+#undef UPDATE
 
   return G_SOURCE_CONTINUE;
 }
@@ -522,14 +540,18 @@ tick_cb (GtkWidget     *widget,
  * -1 and 0 will be lerped to the desired range afterwards. Otherwise use 0 for in-place
  * animations which already start at equilibrium
  */
-static double
-oscillate (SpringData *data,
-           double      time,
-           double     *velocity)
+double
+spring_oscillate (double  damping,
+                  double  mass,
+                  double  stiffness,
+                  double  from,
+                  double  to,
+                  double  time,
+                  double *velocity)
 {
-  double b        = data->damping;
-  double m        = data->mass;
-  double k        = data->stiffness;
+  double b        = damping;
+  double m        = mass;
+  double k        = stiffness;
   double v0       = 0.0;
   double beta     = 0.0;
   double omega0   = 0.0;
@@ -538,7 +560,7 @@ oscillate (SpringData *data,
 
   beta     = b / (2 * m);
   omega0   = sqrt (k / m);
-  x0       = data->from - data->to;
+  x0       = from - to;
   envelope = exp (-beta * time);
 
   /*
@@ -557,8 +579,8 @@ oscillate (SpringData *data,
                      beta * beta * time * x0 +
                      v0);
 
-      return data->to + envelope *
-                            (x0 + (beta * x0 + v0) * time);
+      return to + envelope *
+                      (x0 + (beta * x0 + v0) * time);
     }
 
   /* Underdamped */
@@ -576,11 +598,11 @@ oscillate (SpringData *data,
                           (omega1)) *
                          sin (omega1 * time));
 
-      return data->to + envelope *
-                            (x0 * cos (omega1 * time) +
-                             ((beta * x0 + v0) /
-                              omega1) *
-                                 sin (omega1 * time));
+      return to + envelope *
+                      (x0 * cos (omega1 * time) +
+                       ((beta * x0 + v0) /
+                        omega1) *
+                           sin (omega1 * time));
     }
 
   /* Overdamped */
@@ -598,17 +620,21 @@ oscillate (SpringData *data,
                           omega2) *
                          sinhl (omega2 * time));
 
-      return data->to + envelope *
-                            (x0 * coshl (omega2 * time) +
-                             ((beta * x0 + v0) / omega2) *
-                                 sinhl (omega2 * time));
+      return to + envelope *
+                      (x0 * coshl (omega2 * time) +
+                       ((beta * x0 + v0) / omega2) *
+                           sinhl (omega2 * time));
     }
 
   g_assert_not_reached ();
 }
 
-static double
-get_first_zero (SpringData *data)
+double
+spring_get_first_zero (double damping,
+                       double mass,
+                       double stiffness,
+                       double from,
+                       double to)
 {
   /* The first frame is not that important and we avoid finding the trivial 0
    * for in-place animations. */
@@ -616,16 +642,28 @@ get_first_zero (SpringData *data)
     {
       double y = 0.0;
 
-      y = oscillate (data, (double) i / 1000.0, NULL);
-      if (!((data->to - data->from > DBL_EPSILON && data->to - y > EPSILON) ||
-            (data->from - data->to > DBL_EPSILON && y - data->to > EPSILON)))
+      y = spring_oscillate (
+          damping,
+          mass,
+          stiffness,
+          from,
+          to,
+          (double) i / 1000.0,
+          NULL);
+      if (!((to - from > DBL_EPSILON && to - y > EPSILON) ||
+            (from - to > DBL_EPSILON && y - to > EPSILON)))
         return y;
     }
   return 0.0;
 }
 
-static double
-calculate_duration (SpringData *data)
+double
+spring_calculate_duration (double   damping,
+                           double   mass,
+                           double   stiffness,
+                           double   from,
+                           double   to,
+                           gboolean clamp)
 {
   double beta   = 0.0;
   double omega0 = 0.0;
@@ -635,20 +673,24 @@ calculate_duration (SpringData *data)
   double y1     = 0.0;
   double m      = 0.0;
 
-  beta = data->damping / (2 * data->mass);
+  beta = damping / (2 * mass);
 
   if (G_APPROX_VALUE (beta, 0, DBL_EPSILON) ||
       beta < 0)
     return G_MAXDOUBLE;
 
-  if (data->clamp)
+  if (clamp)
     {
-      if (G_APPROX_VALUE (data->to, data->from, DBL_EPSILON))
+      if (G_APPROX_VALUE (to, from, DBL_EPSILON))
         return 0;
-      return get_first_zero (data);
+      return spring_get_first_zero (damping,
+                                    mass,
+                                    stiffness,
+                                    from,
+                                    to);
     }
 
-  omega0 = sqrt (data->stiffness / data->mass);
+  omega0 = sqrt (stiffness / mass);
 
   /*
    * As first ansatz for the overdamped solution,
@@ -669,26 +711,64 @@ calculate_duration (SpringData *data)
    * Newton's root finding method is a good candidate in this particular case:
    * https://en.wikipedia.org/wiki/Newton%27s_method
    */
-  y0 = oscillate (data, x0, NULL);
-  m  = (oscillate (data, (x0 + DELTA), NULL) - y0) / DELTA;
+  y0 = spring_oscillate (damping,
+                         mass,
+                         stiffness,
+                         from,
+                         to,
+                         x0,
+                         NULL);
+  m  = (spring_oscillate (
+            damping,
+            mass,
+            stiffness,
+            from,
+            to,
+            (x0 + DELTA),
+            NULL) -
+        y0) /
+       DELTA;
 
-  x1 = (data->to - y0 + m * x0) / m;
-  y1 = oscillate (data, x1, NULL);
+  x1 = (to - y0 + m * x0) / m;
+  y1 = spring_oscillate (
+      damping,
+      mass,
+      stiffness,
+      from,
+      to,
+      x1,
+      NULL);
 
   for (int i = 0;
-       ABS (data->to - y1) > EPSILON && i < 1000;
+       ABS (to - y1) > EPSILON && i < 1000;
        i++)
     {
       x0 = x1;
       y0 = y1;
 
-      m = (oscillate (data, x0 + DELTA, NULL) - y0) / DELTA;
+      m = (spring_oscillate (
+               damping,
+               mass,
+               stiffness,
+               from,
+               to,
+               x0 + DELTA,
+               NULL) -
+           y0) /
+          DELTA;
 
-      x1 = (data->to - y0 + m * x0) / m;
-      y1 = oscillate (data, x1, NULL);
+      x1 = (to - y0 + m * x0) / m;
+      y1 = spring_oscillate (
+          damping,
+          mass,
+          stiffness,
+          from,
+          to,
+          x1,
+          NULL);
     }
 
-  if (ABS (data->to - y1) <= EPSILON)
+  if (ABS (to - y1) <= EPSILON)
     return x1;
   else
     return 0.0;
@@ -705,8 +785,7 @@ destroy_spring_data (gpointer ptr)
       data->user_data != NULL)
     data->destroy_data (data->user_data);
   g_clear_pointer (&data->timer, g_timer_destroy);
-  dex_clear (&data->promise);
-  dex_clear (&data->cancellable);
+  g_clear_object (&data->cancellable);
   g_free (ptr);
 }
 
@@ -719,8 +798,8 @@ destroy_wr (gpointer ptr)
   g_free (ptr);
 }
 
-static gboolean
-should_animate (GtkWidget *widget)
+gboolean
+bge_should_animate (GtkWidget *widget)
 {
   GtkSettings *settings          = NULL;
   gboolean     enable_animations = FALSE;

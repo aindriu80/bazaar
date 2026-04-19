@@ -666,6 +666,11 @@ hooks:
             # styling
             style: suggested
     shell: exec /absolute/path/to/bazaar-jetbrains-hook.bash
+    # This gives you the opportunity to add a basic regex check on an incoming
+    # appid before incurring the overhead of spawning a subprocess. This
+    # improves performance and reduces script boilerplate for long lists of
+    # hooks that execute on specific appids.
+    check-appid-regex: ^com\.jetbrains\..*$
 ```
 
 `/absolute/path/to/bazaar-jetbrains-hook.bash`:
@@ -798,8 +803,8 @@ new-score = y-intercept + (slope * original-score)
 
 #### Exponential
 
-Linear functions require a `factor` and a `y-intercept` and are evaluated like
-this:
+Exponential functions require a `factor` and a `y-intercept` and are evaluated
+like this:
 
 ```
 new-score = y-intercept * (factor ^ original-score)

@@ -32,13 +32,14 @@
 #include "bz-env.h"
 #include "bz-error.h"
 #include "bz-flathub-page.h"
+#include "bz-flatpak-entry.h"
 #include "bz-full-view.h"
 #include "bz-global-progress.h"
 #include "bz-hooks.h"
 #include "bz-io.h"
 #include "bz-library-page.h"
 #include "bz-progress-bar.h"
-#include "bz-search-widget.h"
+#include "bz-search-page.h"
 #include "bz-template-callbacks.h"
 #include "bz-transaction-dialog.h"
 #include "bz-transaction-manager.h"
@@ -60,7 +61,7 @@ struct _BzWindow
   BzCometOverlay    *comet_overlay;
   AdwNavigationView *navigation_view;
   BzFullView        *full_view;
-  BzSearchWidget    *search_widget;
+  BzSearchPage      *search_page;
   BzLibraryPage     *library_page;
   AdwToastOverlay   *toasts;
   AdwViewStack      *main_view_stack;
@@ -74,6 +75,7 @@ enum
   PROP_0,
 
   PROP_STATE,
+  PROP_COMPACT,
 
   LAST_PROP
 };
@@ -164,6 +166,9 @@ bz_window_get_property (GObject    *object,
     {
     case PROP_STATE:
       g_value_set_object (value, self->state);
+      break;
+    case PROP_COMPACT:
+      g_value_set_boolean (value, self->breakpoint_applied);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -299,7 +304,7 @@ browse_flathub_cb (BzWindow      *self,
 
 static void
 open_search_cb (BzWindow       *self,
-                BzSearchWidget *widget)
+                BzSearchPage *widget)
 {
   adw_view_stack_set_visible_child_name (self->main_view_stack, "search");
 }
@@ -311,6 +316,7 @@ breakpoint_apply_cb (BzWindow      *self,
   self->breakpoint_applied = TRUE;
 
   gtk_widget_add_css_class (GTK_WIDGET (self), "narrow");
+  g_object_notify_by_pspec (G_OBJECT (self), props[PROP_COMPACT]);
 }
 
 static void
@@ -320,6 +326,7 @@ breakpoint_unapply_cb (BzWindow      *self,
   self->breakpoint_applied = FALSE;
 
   gtk_widget_remove_css_class (GTK_WIDGET (self), "narrow");
+  g_object_notify_by_pspec (G_OBJECT (self), props[PROP_COMPACT]);
 }
 
 static void
@@ -361,6 +368,16 @@ format_progress (gpointer object,
                  double   value)
 {
   return g_strdup_printf ("%.0f%%", 100.0 * value);
+}
+
+static char *
+format_title (gpointer    object,
+              const char *title)
+{
+  if (title == NULL || *title == '\0' || g_strcmp0 (title, _ ("Bazaar")) == 0)
+    return g_strdup (_ ("Bazaar"));
+  /* Translators: %s is the title of the current page */
+  return g_strdup_printf (_ ("Bazaar — %s"), title);
 }
 
 static BzEntryGroup *
@@ -419,72 +436,18 @@ action_show_group (GtkWidget  *widget,
       bz_state_info_get_application_factory (self->state),
       gtk_string_object_new (id));
 
-  if (group != NULL)
-    bz_window_show_group (self, group);
-}
+  if (group == NULL)
+    return;
 
-static gboolean
-test_has_addons (BzEntry *entry)
-{
-  GListModel *model = NULL;
-
-  model = bz_entry_get_addons (entry);
-  return model != NULL && g_list_model_get_n_items (model) > 0;
-}
-
-static void
-addon_transact_cb (BzWindow       *self,
-                   BzEntry        *entry,
-                   BzAddonsDialog *dialog)
-{
-  gboolean installed = FALSE;
-
-  g_object_get (entry, "installed", &installed, NULL);
-
-  try_transact (self, entry, NULL, installed, TRUE, NULL);
-}
-
-static DexFuture *
-addons_fiber (BzEntryGroup *group)
-{
-  g_autoptr (GError) local_error = NULL;
-  g_autoptr (BzEntry) entry      = NULL;
-  g_autoptr (GListModel) model   = NULL;
-  BzStateInfo *state             = NULL;
-  GtkWidget   *window            = NULL;
-  AdwDialog   *addons_dialog     = NULL;
-
-  state = bz_state_info_get_default ();
-  if (state == NULL)
-    return NULL;
-
-  window = GTK_WIDGET (gtk_application_get_active_window (
-      GTK_APPLICATION (g_application_get_default ())));
-
-  entry = bz_entry_group_find_entry (group, test_has_addons,
-                                     window, &local_error);
-  if (entry == NULL)
+  if (bz_entry_group_is_addon (group))
     {
-      if (local_error != NULL)
-        bz_show_error_for_widget (window,
-                                  _ ("Failed to load add-ons"),
-                                  local_error->message);
-      return NULL;
+      AdwDialog *dialog = NULL;
+
+      dialog =bz_addons_dialog_new_single (group);
+      adw_dialog_present (dialog, GTK_WIDGET (self));
     }
-
-  model = bz_application_map_factory_generate (
-      bz_state_info_get_entry_factory (state),
-      bz_entry_get_addons (entry));
-
-  addons_dialog = bz_addons_dialog_new (entry, model);
-  g_signal_connect_swapped (
-      addons_dialog, "transact",
-      G_CALLBACK (addon_transact_cb), window);
-  gtk_widget_set_size_request (GTK_WIDGET (addons_dialog), 350, -1);
-
-  adw_dialog_present (addons_dialog, window);
-
-  return NULL;
+  else
+    bz_window_show_group (self, group);
 }
 
 static void
@@ -495,6 +458,7 @@ action_addons_group (GtkWidget  *widget,
   BzWindow   *self               = BZ_WINDOW (widget);
   const char *id                 = NULL;
   g_autoptr (BzEntryGroup) group = NULL;
+  AdwDialog  *addons_dialog      = NULL;
 
   id    = g_variant_get_string (parameter, NULL);
   group = bz_application_map_factory_convert_one (
@@ -504,12 +468,8 @@ action_addons_group (GtkWidget  *widget,
   if (group == NULL)
     return;
 
-  dex_future_disown (dex_scheduler_spawn (
-      dex_scheduler_get_default (),
-      bz_get_dex_stack_size (),
-      (DexFiberFunc) addons_fiber,
-      g_object_ref (group),
-      g_object_unref));
+  addons_dialog = bz_addons_dialog_new (group);
+  adw_dialog_present (addons_dialog, GTK_WIDGET (self));
 }
 
 static void
@@ -564,6 +524,74 @@ action_open_library (GtkWidget  *widget,
   bz_library_page_reset_search (self->library_page);
 }
 
+static DexFuture *
+launch_group_fiber (BzEntryGroup *group)
+{
+  g_autoptr (GError) local_error = NULL;
+  g_autoptr (GListStore) store   = NULL;
+  GtkWidget   *window            = NULL;
+  BzStateInfo *state             = NULL;
+
+  state  = bz_state_info_get_default ();
+  window = GTK_WIDGET (gtk_application_get_active_window (
+      GTK_APPLICATION (g_application_get_default ())));
+
+  store = dex_await_object (
+      bz_entry_group_dup_all_into_store (group), &local_error);
+  if (store == NULL)
+    {
+      if (window != NULL)
+        bz_show_error_for_widget (window, _ ("Failed to launch application"), local_error->message);
+      return dex_future_new_for_error (g_steal_pointer (&local_error));
+    }
+
+  for (guint i = 0; i < g_list_model_get_n_items (G_LIST_MODEL (store)); i++)
+    {
+      g_autoptr (BzEntry) entry = NULL;
+
+      entry = g_list_model_get_item (G_LIST_MODEL (store), i);
+      if (BZ_IS_FLATPAK_ENTRY (entry) && bz_entry_is_installed (entry))
+        {
+          gboolean result = bz_flatpak_entry_launch (
+              BZ_FLATPAK_ENTRY (entry),
+              BZ_FLATPAK_INSTANCE (bz_state_info_get_backend (state)),
+              &local_error);
+
+          if (!result && window != NULL)
+            bz_show_error_for_widget (window, _ ("Failed to launch application"), local_error->message);
+
+          return result ? dex_future_new_true () : dex_future_new_for_error (g_steal_pointer (&local_error));
+        }
+    }
+
+  return dex_future_new_false ();
+}
+
+static void
+action_launch_group (GtkWidget  *widget,
+                     const char *action_name,
+                     GVariant   *parameter)
+{
+  BzWindow   *self               = BZ_WINDOW (widget);
+  const char *id                 = NULL;
+  g_autoptr (BzEntryGroup) group = NULL;
+
+  id    = g_variant_get_string (parameter, NULL);
+  group = bz_application_map_factory_convert_one (
+      bz_state_info_get_application_factory (self->state),
+      gtk_string_object_new (id));
+
+  if (group == NULL)
+    return;
+
+  dex_future_disown (dex_scheduler_spawn (
+      dex_scheduler_get_default (),
+      bz_get_dex_stack_size (),
+      (DexFiberFunc) launch_group_fiber,
+      g_object_ref (group),
+      g_object_unref));
+}
+
 static void
 bz_window_class_init (BzWindowClass *klass)
 {
@@ -581,10 +609,16 @@ bz_window_class_init (BzWindowClass *klass)
           BZ_TYPE_STATE_INFO,
           G_PARAM_READABLE);
 
+  props[PROP_COMPACT] =
+      g_param_spec_boolean (
+          "compact",
+          NULL, NULL, FALSE,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+
   g_object_class_install_properties (object_class, LAST_PROP, props);
 
   g_type_ensure (BZ_TYPE_COMET_OVERLAY);
-  g_type_ensure (BZ_TYPE_SEARCH_WIDGET);
+  g_type_ensure (BZ_TYPE_SEARCH_PAGE);
   g_type_ensure (BZ_TYPE_GLOBAL_PROGRESS);
   g_type_ensure (BZ_TYPE_PROGRESS_BAR);
   g_type_ensure (BZ_TYPE_CURATED_VIEW);
@@ -599,7 +633,7 @@ bz_window_class_init (BzWindowClass *klass)
   gtk_widget_class_bind_template_child (widget_class, BzWindow, navigation_view);
   gtk_widget_class_bind_template_child (widget_class, BzWindow, full_view);
   gtk_widget_class_bind_template_child (widget_class, BzWindow, toasts);
-  gtk_widget_class_bind_template_child (widget_class, BzWindow, search_widget);
+  gtk_widget_class_bind_template_child (widget_class, BzWindow, search_page);
   gtk_widget_class_bind_template_child (widget_class, BzWindow, library_page);
   gtk_widget_class_bind_template_child (widget_class, BzWindow, main_view_stack);
   gtk_widget_class_bind_template_child (widget_class, BzWindow, main_stack);
@@ -613,6 +647,7 @@ bz_window_class_init (BzWindowClass *klass)
   gtk_widget_class_bind_template_callback (widget_class, browse_flathub_cb);
   gtk_widget_class_bind_template_callback (widget_class, open_search_cb);
   gtk_widget_class_bind_template_callback (widget_class, format_progress);
+  gtk_widget_class_bind_template_callback (widget_class, format_title);
 
   gtk_widget_class_install_action (widget_class, "escape", NULL, action_escape);
   gtk_widget_class_install_action (widget_class, "window.user-data", NULL, action_user_data);
@@ -623,6 +658,7 @@ bz_window_class_init (BzWindowClass *klass)
   gtk_widget_class_install_action (widget_class, "window.show-group", "s", action_show_group);
   gtk_widget_class_install_action (widget_class, "window.addons-group", "s", action_addons_group);
   gtk_widget_class_install_action (widget_class, "window.bulk-install", NULL, action_bulk_install);
+  gtk_widget_class_install_action (widget_class, "window.launch-group", "s", action_launch_group);
 
   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_d, GDK_CONTROL_MASK, "window.open-library", NULL);
   gtk_widget_class_add_binding_action (widget_class, GDK_KEY_w, GDK_CONTROL_MASK, "window.close", NULL);
@@ -654,7 +690,7 @@ key_pressed (BzWindow              *self,
   else
     {
       adw_view_stack_set_visible_child_name (self->main_view_stack, "search");
-      return bz_search_widget_ensure_active (self->search_widget, buf);
+      return bz_search_page_ensure_active (self->search_page, buf);
     }
 }
 
@@ -682,7 +718,7 @@ app_busy_changed (BzWindow    *self,
                   GParamSpec  *pspec,
                   BzStateInfo *info)
 {
-  bz_search_widget_refresh (self->search_widget);
+  bz_search_page_refresh (self->search_page);
   set_page (self);
 }
 
@@ -888,19 +924,12 @@ bz_window_show_entry (BzWindow *self,
                       BzEntry  *entry)
 {
   g_autoptr (BzEntryGroup) group = NULL;
-  AdwNavigationPage *view_page   = NULL;
 
   g_return_if_fail (BZ_IS_WINDOW (self));
   g_return_if_fail (BZ_IS_ENTRY (entry));
 
   group = bz_entry_group_new_for_single_entry (entry);
-  bz_full_view_set_entry_group (self->full_view, group);
-
-  view_page = adw_navigation_view_find_page (self->navigation_view, "view");
-  if (view_page != NULL)
-    adw_navigation_view_pop_to_page (self->navigation_view, view_page);
-  else
-    adw_navigation_view_push_by_tag (self->navigation_view, "view");
+  bz_window_show_group(self, group);
 }
 
 void
@@ -1110,11 +1139,11 @@ search (BzWindow   *self,
         const char *initial)
 {
   if (initial != NULL && *initial != '\0')
-    bz_search_widget_set_text (self->search_widget, initial);
+    bz_search_page_set_text (self->search_page, initial);
 
   adw_view_stack_set_visible_child_name (self->main_view_stack, "search");
   adw_navigation_view_pop_to_tag (self->navigation_view, "main");
-  gtk_widget_grab_focus (GTK_WIDGET (self->search_widget));
+  gtk_widget_grab_focus (GTK_WIDGET (self->search_page));
 }
 
 static void

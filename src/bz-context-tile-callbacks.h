@@ -1,6 +1,6 @@
-/* bz-markdown-render.h
+/* bz-context-tile-callbacks.h
  *
- * Copyright 2025 Eva M
+ * Copyright 2026 Eva M, Alexander Vanhee
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,30 +20,7 @@
 
 #pragma once
 
-#include <adwaita.h>
-
-G_BEGIN_DECLS
-
-#define BZ_TYPE_MARKDOWN_RENDER (bz_markdown_render_get_type ())
-G_DECLARE_FINAL_TYPE (BzMarkdownRender, bz_markdown_render, BZ, MARKDOWN_RENDER, AdwBin)
-
-GtkWidget *
-bz_markdown_render_new (void);
-
-const char *
-bz_markdown_render_get_markdown (BzMarkdownRender *self);
-
-gboolean
-bz_markdown_render_get_selectable (BzMarkdownRender *self);
+#include <gtk/gtk.h>
 
 void
-bz_markdown_render_set_markdown (BzMarkdownRender *self,
-                                 const char       *markdown);
-
-void
-bz_markdown_render_set_selectable (BzMarkdownRender *self,
-                                   gboolean          selectable);
-
-G_END_DECLS
-
-/* End of bz-markdown-render.h */
+bz_widget_class_bind_all_context_tile_callbacks (GtkWidgetClass *widget_class);
